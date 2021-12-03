@@ -1,3 +1,5 @@
 from django.shortcuts import render
+from django.http import HttpResponse
 
-# Create your views here.
+def display_members(request):
+    return HttpResponse("<h1>MyClub Event Calendar</h1>")
