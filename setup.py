@@ -1,7 +1,7 @@
 from setuptools import setup
 
 setup(
-    name='django_frames',
+    name='django-frames',
     version='0.1.0',
     description='Use Django entities with pandas data frames',
     url='https://github.com/OrigamiPaperCrane/django-frames',
