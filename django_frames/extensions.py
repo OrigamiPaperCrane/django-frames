@@ -2,7 +2,7 @@ import pandas as pd
 import pytz
 from django.db.models import DateTimeField
 from django.db.models.fields.related_descriptors import ForwardManyToOneDescriptor
-
+from django.db.models.fields.related import ForeignKey
 
 class FramedModel:
 
@@ -15,15 +15,31 @@ class FramedModel:
             return value
 
     @classmethod
-    def to_entities(cls, df):
-        """transpose entities from a dataframe"""
+    def _select_fields(cls, df):
         fields = {str(i).split('.')[-1:][0] for i in cls._meta.fields}  # default includes all fields and annotations
-        forwardings = {fwa for fwa in cls._dict_.keys() if isinstance(getattr(cls, fwa),ForwardManyToOneDescriptor)}
+        forwardings = {fwa for fwa in cls.__dict__.keys() if isinstance(getattr(cls, fwa),ForwardManyToOneDescriptor)}
         fields = fields - forwardings
-        if not 'id' in df.columns:
+        fields = fields.union({f+'_id' for f in forwardings})
+        related_field_names = {cls._meta.model_name,
+                               cls._meta.model_name + '_id',
+                               cls._meta.model_name + '_set_id'}
+        fields = set(df.columns).intersection(fields.union(related_field_names))
+        return fields
+
+    @classmethod
+    def to_entities(cls, df, pk=None):
+        """transpose entities from a dataframe"""
+        fields = cls._select_fields(df)
+        if not 'id' in df.columns and pk is None:
             df.reset_index(inplace=True)
             df = df.rename(columns={'index': 'id'})
             df.index = df.index.rename('id')
+        elif pk is not None:
+            df.reset_index(inplace=True)
+            if 'id' in df.columns:
+                df.drop(axis=1, columns=['id'], inplace=True)
+            df = df.rename(columns={pk: 'id'})
+            fields = fields - {pk}
         frame = df[fields]
         dtfields = []
         top_object = frame.head(1).iloc[0]
@@ -47,10 +63,13 @@ class FramedModel:
         if qset.count() == 0:
             raise ValueError('EmptyQuerySet: failed to access first item in queryset, '
                              'function only works with substantial querysets')
+        first = qset.first()
+        strip_name = lambda s: str(s).split('.')[-1:][0]
         if fields is None:
             # default includes all fields and annotations
-            fields = [str(i).split('.')[-1:][0] for i in qset.model._meta.fields] \
-                     + list(qset.query.annotations.keys())
+            fields = [strip_name(i) for i in qset.model._meta.fields if not isinstance(i, ForeignKey)] \
+                     + list(qset.query.annotations.keys()) \
+                     + [strip_name(f)+'_id' for f in qset.model._meta.fields if isinstance(f, ForeignKey)]
         frame = pd.DataFrame(qset.values_list(*fields), columns=fields)
         if keep_types is True:
             conversion = {}
@@ -66,13 +85,13 @@ class FramedModel:
                 conversion[field] = pd_dtype
             frame = frame.astype(conversion)
         if set_index is True:
-            if not fields[index_item].endswith('id') and qset.first()._meta.pk.attname != fields[index_item]:
+            if not fields[index_item].endswith('id') and first._meta.pk.attname != fields[index_item]:
                 print('WARNING', f'{fields[index_item]} may not be an incremental key field, '
                                 f'assert its singularity by pd.drop_duplicates()')
             frame.set_index(fields[index_item], inplace=True)
-        for model_name in join_prefetch:
-            if model_name+'s' in qset.first()._prefetched_objects_cache.keys():
-                frame = join_prefetched_entities(frame, qset, model_name)
+        for selector in join_prefetch:
+            if selector in qset.first()._prefetched_objects_cache.keys():
+                frame = join_prefetched_entities(frame, qset, selector)
         return frame
 
 
@@ -81,7 +100,7 @@ def join_prefetched_entities(frame, qset, model_name):
     base_frame = pd.DataFrame()
     combine_key = lambda t:  model_name + '_id'
     for item in qset:
-        m2m_relation = item._prefetched_objects_cache[model_name+'s']
+        m2m_relation = item._prefetched_objects_cache[model_name]
         key = combine_key(item)
         related_df = FramedModel.to_df(m2m_relation)
         related_df.reset_index(inplace=True)
